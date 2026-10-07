@@ -1,0 +1,46 @@
+name: Hatsunezushi availability
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Check availability without sending notifications or updating state
+        type: boolean
+        default: false
+      test_notification:
+        description: Send a test notification without checking availability
+        type: boolean
+        default: false
+permissions:
+  contents: write
+concurrency:
+  group: hatsunezushi-monitor
+  cancel-in-progress: false
+jobs:
+  check:
+    if: vars.MONITOR_ENABLED == 'true' || inputs.dry_run == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Run tests
+        run: python3 -m unittest -v
+      - name: Check availability or test notification
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          NTFY_SERVER: ${{ secrets.NTFY_SERVER }}
+          NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
+          TEST_NOTIFICATION: ${{ inputs.test_notification }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          if [ "$DRY_RUN" = "true" ]; then
+            python3 monitor.py --dry-run
+          elif [ "$TEST_NOTIFICATION" = "true" ]; then
+            python3 monitor.py --test-notification
+          else
+            python3 monitor.py
+          fi
