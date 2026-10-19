@@ -1,5 +1,6 @@
 {
   "available": [],
-  "error": "HTTPError",
-  "checked_week": "2026-W42"
+  "error": "HTTPError 429 tablecheck",
+  "checked_week": "2026-W42",
+  "failures": 1
 }
