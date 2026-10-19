@@ -17,6 +17,7 @@ RESERVE = BASE + "/reserve"
 JST = timezone(timedelta(hours=9))
 ATTEMPTS = 3
 FAILURES_BEFORE_ALERT = 3
+EMPTY_WEEKS_AT_WINDOW_END = 2
 
 
 def describe_error(exc):
@@ -163,9 +164,15 @@ class TableCheck:
     def scan(self, weeks):
         today = datetime.now(JST).date()
         possible = set()
+        empty_weeks = 0
         for week in range(weeks):
             day = (today + timedelta(days=7 * week)).isoformat()
-            possible.update(candidates(self.timetable(day), today))
+            data = self.timetable(day)
+            possible.update(candidates(data, today))
+            # Weeks beyond the booking window return no slots; stop there to avoid rate limits.
+            empty_weeks = 0 if data["data"]["slots"] else empty_weeks + 1
+            if empty_weeks == EMPTY_WEEKS_AT_WINDOW_END:
+                break
             time.sleep(0.5)
         # Check the course's actual booking times and availability before notifying.
         result = []
