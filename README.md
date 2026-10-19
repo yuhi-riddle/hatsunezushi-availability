@@ -37,6 +37,32 @@ GitHubリポジトリのSettings → Secrets and variables → Actionsで設定�
 
 定期実行は遅延・欠落する場合があります。1時間の確認間隔に開放されて埋まった枠は検出できません。サイトの仕様変更やアクセス制限によって監視が止まることがあります。
 
+## 外部からの毎時起動
+
+GitHubの定期実行（`schedule`）は混雑時に捨てられることがあり、2026年10月の実績では毎時の指定に対して1日5回前後しか動きませんでした。そこで無料のcron-job.orgから毎時、手動実行と同じ入口（`workflow_dispatch`）を呼び出します。`schedule` は外部サービスが止まったときの予備として残します。同じ時刻に両方が動いても、2回目は保存済みの状態と比べるため、同じ枠を重ねて通知しません。
+
+### トークン（GitHub → Settings → Developer settings → Fine-grained tokens）
+
+| 項目 | 値 |
+| --- | --- |
+| Repository access | Only select repositories → このリポジトリだけ |
+| Repository permissions | Actions: Read and write（ほかは No access） |
+| Expiration | 期限を設定し、切れる前に作り直す |
+
+このトークンでできるのは、このリポジトリのActionsの実行・停止・ログ削除と、ワークフローの有効化・無効化までです。コードや設定は変更できません。
+
+### cron-job.org のジョブ
+
+| 項目 | 値 |
+| --- | --- |
+| URL | `https://api.github.com/repos/yuhi-riddle/hatsunezushi-availability/actions/workflows/monitor.yml/dispatches` |
+| Schedule | 毎時17分、Time zone: Asia/Tokyo |
+| Request method | POST |
+| Headers | `Authorization: Bearer <トークン>` / `Accept: application/vnd.github+json` / `X-GitHub-Api-Version: 2022-11-28` / `Content-Type: application/json` |
+| Request body | `{"ref":"main"}` |
+
+成功すると応答は `204` になります。停止するには `MONITOR_ENABLED` を `false` にします（外部からの起動もジョブの条件で止まります）。
+
 ## ローカル確認
 
 Python 3.10以上の標準ライブラリで動きます。
