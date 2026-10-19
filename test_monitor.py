@@ -1,7 +1,8 @@
 import unittest
 from datetime import date
 from types import SimpleNamespace
-from unittest.mock import patch
+from urllib.error import HTTPError, URLError
+from unittest.mock import MagicMock, patch
 
 import monitor
 
@@ -12,6 +13,39 @@ def response(slots):
 
 def slot(available=True, meal="lunch", seconds=43200):
     return {"available": available, "meal": meal, "seconds": seconds}
+
+
+def http_error(code, url=monitor.RESERVE, headers=None):
+    return HTTPError(url, code, "error", headers or {}, None)
+
+
+def ok_response(body=b"{}"):
+    response = MagicMock()
+    response.__enter__.return_value.read.return_value = body
+    return response
+
+
+def client_with(*results):
+    client = monitor.TableCheck.__new__(monitor.TableCheck)
+    client.opener = MagicMock()
+    client.opener.open.side_effect = list(results)
+    client.deadline = monitor.time.monotonic() + 60
+    return client
+
+
+def run_with_failure(previous):
+    saved, notified = [], []
+    class State:
+        def load(self):
+            return dict(previous)
+        def save(self, state):
+            saved.append(state)
+    with patch.object(monitor, "GitHubState", return_value=State()), \
+         patch.object(monitor, "TableCheck", side_effect=http_error(403)), \
+         patch.object(monitor, "notify", side_effect=lambda *a: notified.append(a)):
+        with unittest.TestCase().assertRaises(HTTPError):
+            monitor.run(SimpleNamespace(test_notification=False, dry_run=False, weeks=52))
+    return saved, notified
 
 
 class MonitorTests(unittest.TestCase):
@@ -76,7 +110,75 @@ class MonitorTests(unittest.TestCase):
              patch.object(monitor, "notify"):
             with self.assertRaises(TimeoutError):
                 monitor.run(SimpleNamespace(test_notification=False, dry_run=False, weeks=52))
-        self.assertEqual(saved, [{"available": ["2026-10-10|43200|lunch-id"], "error": "TimeoutError"}])
+        self.assertEqual(saved, [{"available": ["2026-10-10|43200|lunch-id"],
+                                  "error": "TimeoutError", "failures": 1}])
+
+    def test_transient_errors_are_retried(self):
+        for error in (http_error(429), http_error(503), URLError("reset")):
+            with self.subTest(error=error), patch.object(monitor.time, "sleep"):
+                client = client_with(error, ok_response(b'{"ok": true}'))
+                self.assertEqual(client.get("https://example.test"), {"ok": True})
+                self.assertEqual(client.opener.open.call_count, 2)
+
+    def test_retry_honors_short_retry_after(self):
+        with patch.object(monitor.time, "sleep") as sleep:
+            client_with(http_error(429, headers={"Retry-After": "5"}), ok_response()).get("https://example.test")
+        sleep.assert_called_once_with(5)
+
+    def test_forbidden_is_not_retried(self):
+        client = client_with(http_error(403), ok_response())
+        with self.assertRaises(HTTPError):
+            client.get("https://example.test")
+        self.assertEqual(client.opener.open.call_count, 1)
+
+    def test_retries_stop_after_three_attempts(self):
+        client = client_with(http_error(503), http_error(503), http_error(503), ok_response())
+        with patch.object(monitor.time, "sleep"), self.assertRaises(HTTPError):
+            client.get("https://example.test")
+        self.assertEqual(client.opener.open.call_count, 3)
+
+    def test_error_label_shows_status_and_stage_without_url(self):
+        self.assertEqual(monitor.describe_error(http_error(403)), "HTTPError 403 tablecheck")
+        self.assertEqual(monitor.describe_error(http_error(409, "https://api.github.com/repos/x/y/contents/state.json")),
+                         "HTTPError 409 github")
+        self.assertEqual(monitor.describe_error(http_error(500, "https://private.example/secret-topic")),
+                         "HTTPError 500 ntfy")
+        self.assertEqual(monitor.describe_error(TimeoutError()), "TimeoutError")
+
+    def test_error_is_notified_only_on_third_consecutive_failure(self):
+        saved, notified = run_with_failure({"available": [], "error": None, "failures": 0})
+        self.assertEqual(notified, [])
+        self.assertEqual(saved[0]["failures"], 1)
+        self.assertEqual(saved[0]["error"], "HTTPError 403 tablecheck")
+
+        saved, notified = run_with_failure({"available": [], "error": "HTTPError 403 tablecheck", "failures": 2})
+        self.assertEqual(len(notified), 1)
+        self.assertEqual(saved[0]["failures"], 3)
+
+        saved, notified = run_with_failure({"available": [], "error": "HTTPError 403 tablecheck", "failures": 3})
+        self.assertEqual((saved, notified), ([], []))
+
+    def test_old_state_without_failure_count_starts_from_zero(self):
+        saved, notified = run_with_failure({"available": [], "error": "HTTPError"})
+        self.assertEqual(notified, [])
+        self.assertEqual(saved[0]["failures"], 1)
+
+    def test_success_resets_failure_count(self):
+        saved = []
+        class State:
+            def load(self):
+                return {"available": [], "error": "HTTPError 403 tablecheck", "failures": 2, "checked_week": "2026-W41"}
+            def save(self, state):
+                saved.append(state)
+        class Client:
+            def scan(self, weeks):
+                return []
+        with patch.object(monitor, "GitHubState", return_value=State()), \
+             patch.object(monitor, "TableCheck", return_value=Client()), \
+             patch.object(monitor, "datetime") as clock:
+            clock.now.return_value.strftime.return_value = "2026-W41"
+            monitor.run(SimpleNamespace(test_notification=False, dry_run=False, weeks=52))
+        self.assertEqual(saved, [{"available": [], "error": None, "failures": 0, "checked_week": "2026-W41"}])
 
     def test_ntfy_topic_cannot_change_request_path(self):
         with patch.dict(monitor.os.environ, {"NTFY_TOPIC": "topic/other", "NTFY_SERVER": "https://ntfy.sh"}):
@@ -98,7 +200,7 @@ class MonitorTests(unittest.TestCase):
              patch.object(monitor, "datetime") as clock:
             clock.now.return_value.strftime.return_value = "2026-W41"
             monitor.run(SimpleNamespace(test_notification=False, dry_run=False, weeks=52))
-        self.assertEqual(saved, [{"available": [], "error": None, "checked_week": "2026-W41"}])
+        self.assertEqual(saved, [{"available": [], "error": None, "failures": 0, "checked_week": "2026-W41"}])
 
 
 if __name__ == "__main__":

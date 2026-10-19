@@ -8,13 +8,35 @@ import sys
 import time
 from datetime import date, datetime, timedelta, timezone
 from html.parser import HTMLParser
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
 from urllib.request import HTTPCookieProcessor, Request, build_opener, urlopen
 
 BASE = "https://www.tablecheck.com/ja/shops/hatsunezushi"
 RESERVE = BASE + "/reserve"
 JST = timezone(timedelta(hours=9))
+ATTEMPTS = 3
+FAILURES_BEFORE_ALERT = 3
+
+
+def describe_error(exc):
+    """Name the failing service and status without exposing URLs or topics."""
+    if not isinstance(exc, HTTPError):
+        return type(exc).__name__
+    host = urlparse(exc.filename or "").hostname or ""
+    stage = {"www.tablecheck.com": "tablecheck", "api.github.com": "github"}.get(host, "ntfy")
+    return f"HTTPError {exc.code} {stage}"
+
+
+def retry_wait(exc, attempt):
+    """Seconds to wait before retrying, or None if the error is not transient."""
+    if isinstance(exc, HTTPError):
+        if exc.code != 429 and exc.code < 500:
+            return None
+        retry_after = (exc.headers or {}).get("Retry-After", "")
+        if retry_after.isdigit() and int(retry_after) <= 10:
+            return int(retry_after)
+    return 2 * attempt
 
 
 def candidates(data, today):
@@ -115,12 +137,19 @@ class TableCheck:
         self.csrf, self.courses = parse_page(html)
 
     def get(self, url, as_json=True):
-        remaining = self.deadline - time.monotonic()
-        if remaining < 2:
-            raise TimeoutError("Scan exceeded time limit; state retained")
-        with self.opener.open(url, timeout=min(10, remaining)) as response:
-            body = response.read().decode("utf-8")
-        return json.loads(body) if as_json else body
+        for attempt in range(1, ATTEMPTS + 1):
+            remaining = self.deadline - time.monotonic()
+            if remaining < 2:
+                raise TimeoutError("Scan exceeded time limit; state retained")
+            try:
+                with self.opener.open(url, timeout=min(10, remaining)) as response:
+                    body = response.read().decode("utf-8")
+                return json.loads(body) if as_json else body
+            except URLError as exc:
+                wait = retry_wait(exc, attempt)
+                if wait is None or attempt == ATTEMPTS or time.monotonic() + wait > self.deadline - 2:
+                    raise
+                time.sleep(wait)
 
     def timetable(self, day, course=None):
         params = {"authenticity_token": self.csrf,
@@ -229,7 +258,7 @@ def run(args):
             if len(additions) > 20:
                 lines.append(f"ほか {len(additions) - 20} 枠")
             notify("初音鮨：2名のランチに空きが出ました", "\n".join(lines) + "\n通知をタップして最新の空席を確認してください。")
-        state = {"available": current, "error": None,
+        state = {"available": current, "error": None, "failures": 0,
                  "checked_week": datetime.now(JST).strftime("%G-W%V")}
         if store and state != previous:
             store.save(state)
@@ -237,10 +266,16 @@ def run(args):
                           "new_slots": len(additions), "dry_run": args.dry_run}))
     except Exception as exc:
         # Never erase availability state on failed or partial scans.
-        error = type(exc).__name__
-        if store and previous.get("error") != error:
-            notify("初音鮨：空席確認でエラー", "空席を確認できませんでした。次の定期実行で再試行します。GitHub Actionsの実行結果を確認してください。")
-            previous["error"] = error
+        # Alert once per failure streak; stop counting after the alert to avoid extra commits.
+        failures = previous.get("failures", 0)
+        if store and failures < FAILURES_BEFORE_ALERT:
+            failures += 1
+            if failures == FAILURES_BEFORE_ALERT:
+                notify("初音鮨：空席確認でエラー",
+                       f"{failures}回続けて空席を確認できませんでした。次の定期実行でも再試行します。"
+                       "GitHub Actionsの実行結果を確認してください。")
+            previous["error"] = describe_error(exc)
+            previous["failures"] = failures
             store.save(previous)
         raise
 
@@ -255,5 +290,5 @@ if __name__ == "__main__":
         run(args)
     except Exception as exc:
         # Do not log request URLs, headers, or notification topic names.
-        print("Monitor failed: " + type(exc).__name__, file=sys.stderr)
+        print("Monitor failed: " + describe_error(exc), file=sys.stderr)
         sys.exit(1)
