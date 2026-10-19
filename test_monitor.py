@@ -185,6 +185,27 @@ class MonitorTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 monitor.notify("test", "test")
 
+    def scanned_weeks(self, pattern):
+        """Scan weeks where 'x' has slot data and '.' is empty; return how many weeks were requested."""
+        calls = []
+        def timetable(day, course=None):
+            index = len(calls)
+            calls.append(day)
+            filled = index < len(pattern) and pattern[index] == "x"
+            return response({"2099-01-03": {"a": slot(False)}} if filled else {})
+        client = monitor.TableCheck.__new__(monitor.TableCheck)
+        client.courses = {}
+        client.timetable = timetable
+        with patch.object(monitor.time, "sleep"):
+            self.assertEqual(client.scan(52), [])
+        return len(calls)
+
+    def test_scan_stops_after_two_empty_weeks(self):
+        self.assertEqual(self.scanned_weeks("xx.."), 4)
+
+    def test_scan_continues_past_a_single_empty_week(self):
+        self.assertEqual(self.scanned_weeks("x.x.."), 5)
+
     def test_unchanged_availability_refreshes_activity_in_a_new_week(self):
         saved = []
         class State:
