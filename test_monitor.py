@@ -171,14 +171,17 @@ class MonitorTests(unittest.TestCase):
             def save(self, state):
                 saved.append(state)
         class Client:
+            weeks_scanned = 7
             def scan(self, weeks):
                 return []
         with patch.object(monitor, "GitHubState", return_value=State()), \
              patch.object(monitor, "TableCheck", return_value=Client()), \
-             patch.object(monitor, "datetime") as clock:
+             patch.object(monitor, "datetime") as clock, \
+             patch("builtins.print") as printed:
             clock.now.return_value.strftime.return_value = "2026-W41"
             monitor.run(SimpleNamespace(test_notification=False, dry_run=False, weeks=52))
         self.assertEqual(saved, [{"available": [], "error": None, "failures": 0, "checked_week": "2026-W41"}])
+        self.assertIn('"weeks_scanned": 7', printed.call_args.args[0])
 
     def test_ntfy_topic_cannot_change_request_path(self):
         with patch.dict(monitor.os.environ, {"NTFY_TOPIC": "topic/other", "NTFY_SERVER": "https://ntfy.sh"}):
@@ -198,6 +201,7 @@ class MonitorTests(unittest.TestCase):
         client.timetable = timetable
         with patch.object(monitor.time, "sleep"):
             self.assertEqual(client.scan(52), [])
+        self.assertEqual(client.weeks_scanned, len(calls))
         return len(calls)
 
     def test_scan_stops_after_two_empty_weeks(self):
@@ -214,14 +218,17 @@ class MonitorTests(unittest.TestCase):
             def save(self, state):
                 saved.append(state)
         class Client:
+            weeks_scanned = 7
             def scan(self, weeks):
                 return []
         with patch.object(monitor, "GitHubState", return_value=State()), \
              patch.object(monitor, "TableCheck", return_value=Client()), \
-             patch.object(monitor, "datetime") as clock:
+             patch.object(monitor, "datetime") as clock, \
+             patch("builtins.print") as printed:
             clock.now.return_value.strftime.return_value = "2026-W41"
             monitor.run(SimpleNamespace(test_notification=False, dry_run=False, weeks=52))
         self.assertEqual(saved, [{"available": [], "error": None, "failures": 0, "checked_week": "2026-W41"}])
+        self.assertIn('"weeks_scanned": 7', printed.call_args.args[0])
 
 
 if __name__ == "__main__":
