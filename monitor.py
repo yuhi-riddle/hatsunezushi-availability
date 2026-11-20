@@ -168,6 +168,7 @@ class TableCheck:
         for week in range(weeks):
             day = (today + timedelta(days=7 * week)).isoformat()
             data = self.timetable(day)
+            self.weeks_scanned = week + 1
             possible.update(candidates(data, today))
             # Weeks beyond the booking window return no slots; stop there to avoid rate limits.
             empty_weeks = 0 if data["data"]["slots"] else empty_weeks + 1
@@ -269,7 +270,7 @@ def run(args):
                  "checked_week": datetime.now(JST).strftime("%G-W%V")}
         if store and state != previous:
             store.save(state)
-        print(json.dumps({"weeks_scanned": args.weeks, "available_slots": len(current),
+        print(json.dumps({"weeks_scanned": client.weeks_scanned, "available_slots": len(current),
                           "new_slots": len(additions), "dry_run": args.dry_run}))
     except Exception as exc:
         # Never erase availability state on failed or partial scans.
